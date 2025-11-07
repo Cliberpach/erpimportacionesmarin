@@ -1,0 +1,23 @@
+<table class="table table-sm table-striped table-bordered table-hover" id="table-detalle-pedido">
+    <thead>
+        <tr>
+
+            <th></th>
+            <th scope="col">PRODUCTO</th>
+            <th scope="col">COLOR</th>
+
+            @foreach ($tallas as $talla)
+                <th style="background-color: rgb(210, 242, 242);" scope="col" data-talla={{ $talla->id }}>
+                    {{ $talla->descripcion }}</th>
+            @endforeach
+
+            <th style="text-align: right;">PRECIO VENTA</th>
+            <th style="text-align: right;">SUBTOTAL</th>
+            <th style="text-align: center;">DSCTO %</th>
+
+        </tr>
+    </thead>
+    <tbody>
+
+    </tbody>
+</table>

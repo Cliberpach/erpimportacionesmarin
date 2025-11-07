@@ -1,0 +1,1259 @@
+<?php
+
+namespace App\Http\Controllers\Ventas\Electronico;
+
+use App\Almacenes\Producto;
+use App\Events\NotifySunatEvent;
+use App\Http\Controllers\Controller;
+use App\Mantenimiento\Empresa\Empresa;
+use App\Mantenimiento\Empresa\Numeracion;
+use App\Ventas\Documento\Detalle;
+use App\Ventas\Documento\Documento;
+use App\Ventas\ErrorNota;
+use App\Ventas\Nota;
+use App\Ventas\NotaDetalle;
+use Carbon\Carbon;
+use Exception;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Session;
+use Luecano\NumeroALetras\NumeroALetras;
+use Yajra\DataTables\Facades\DataTables;
+use Barryvdh\DomPDF\Facade as PDF;
+use stdClass;
+
+use Greenter\Model\Sale\Note;
+use Greenter\Model\Sale\SaleDetail;
+use Greenter\Model\Sale\Legend;
+use Greenter\Ws\Services\SunatEndpoints;
+
+use Greenter\Model\Client\Client;
+use Greenter\Model\Company\Address;
+use App\Greenter\Utils\Util;
+use App\Http\Requests\Ventas\NotaElectronica\NotaElectronicaStoreRequest;
+use App\Http\Services\Ventas\NotaCredito\NotaCreditoManager;
+use DateTime;
+use Illuminate\Support\Facades\Auth;
+use Throwable;
+
+class NotaController extends Controller
+{
+    private NotaCreditoManager $s_nota_credito;
+
+    public function __construct(){
+        $this->s_nota_credito   =   new NotaCreditoManager();
+    }
+
+    public function index($id)
+    {
+        $dato = "Message";
+        broadcast(new NotifySunatEvent($dato));
+        $documento          =    Documento::find($id);
+
+        $pedido_facturado   =   DB::select('select p.facturado
+                                from pedidos as p
+                                where p.id = ? and p.facturado = "SI"', [$documento->pedido_id]);
+
+        if (count($pedido_facturado) === 0) {
+            $pedido_facturado = false;
+        } else {
+            $pedido_facturado = true;
+        }
+
+        $pedido_facturado = false;
+
+
+        return view('ventas.notas.index', compact('documento', 'pedido_facturado'));
+    }
+
+    public function index_dev($id)
+    {
+        $documento          =   Documento::find($id);
+        $nota_venta         =   true;
+        $pedido_facturado   =   DB::select('select p.facturado
+                                from pedidos as p
+                                where p.id = ? and p.facturado = "SI"', [$documento->pedido_id]);
+
+        if (count($pedido_facturado) === 0) {
+            $pedido_facturado = false;
+        } else {
+            $pedido_facturado = true;
+        }
+
+        return view('ventas.notas.index', compact('documento', 'nota_venta', 'pedido_facturado'));
+    }
+
+    public function getNotes($id)
+    {
+        $notas = Nota::where('tipo_nota', "0")->where('documento_id', $id)->orderBy('id', 'DESC')->get();
+
+        $coleccion = collect([]);
+        foreach ($notas as $nota) {
+
+            $coleccion->push([
+                'id'                => $nota->id,
+                'tipo_venta_id'     => $nota->documento->tipo_venta_id,
+                'documento_afectado' => $nota->numDocfectado,
+                'fecha_emision'     =>  $nota->fechaEmision,
+                'numero-sunat'      =>  $nota->serie . '-' . $nota->correlativo,
+                'cliente'           => $nota->tipo_documento_cliente . ': ' . $nota->documento_cliente . ' - ' . $nota->cliente,
+                'empresa'           => $nota->empresa,
+                'monto'             => 'S/. ' . number_format($nota->mtoImpVenta, 2, '.', ''),
+                'sunat'             => $nota->sunat,
+                'tipo_nota'         => $nota->tipo_nota,
+                'estado'            => $nota->estado,
+                'cdr_response_code' =>  $nota->cdr_response_code
+            ]);
+        }
+        return DataTables::of($coleccion)->toJson();
+    }
+
+    public function create(Request $request)
+    {
+        $documento = Documento::findOrFail($request->documento_id);
+        $fecha_hoy = Carbon::now()->toDateString();
+        $productos = Producto::where('estado', 'ACTIVO')->get();
+
+        //NOTAS
+        //CREDITO -> 0
+        //DEBITO -> 1
+
+        //======= VALIDANDO QUE LA EMPRESA TENGA ACTIVA EL TIPO DE NOTA DE CRÉDITO A EMITIR =======
+        $validacion =   $this->isActive($documento, Auth::user()->sede_id);
+
+        if (count($validacion->existe) === 0) {
+            Session::flash('nota_credito_error', 'LA EMPRESA NO TIENE ACTIVA LA EMISIÓN DE ' . $validacion->message . ' ,Debe configurar en Mantenimiento\Empresas');
+            return back();
+        }
+
+
+        if ($request->nota == '0') {
+            if ($request->nota_venta) {
+                $nota_venta = true;
+
+                if ($documento->pedido_id) {
+                    return view('ventas.notas.credito.pedidos.create', [
+                        'documento' => $documento,
+                        'fecha_hoy' => $fecha_hoy,
+                        'productos' => $productos,
+                        'nota_venta' => $nota_venta,
+                        'tipo_nota' => '0'
+                    ]);
+                }
+
+                return view('ventas.notas.credito.create', [
+                    'documento' => $documento,
+                    'fecha_hoy' => $fecha_hoy,
+                    'productos' => $productos,
+                    'nota_venta' => $nota_venta,
+                    'tipo_nota' => '0'
+                ]);
+            } else {
+
+                if ($documento->pedido_id) {
+                    return view('ventas.notas.credito.pedidos.create', [
+                        'documento' => $documento,
+                        'fecha_hoy' => $fecha_hoy,
+                        'productos' => $productos,
+                        'tipo_nota' => '0'
+                    ]);
+                }
+
+                return view('ventas.notas.credito.create', [
+                    'documento' => $documento,
+                    'fecha_hoy' => $fecha_hoy,
+                    'productos' => $productos,
+                    'tipo_nota' => '0'
+                ]);
+            }
+        }
+    }
+
+    private function isActive($documento, $sede_id)
+    {
+
+        //====== VERIFICANDO SI NOTAS DE CRÉDITO DEL TIPO DE DOCUMENTO ESTÁ ACTIVO EN LA EMPRESA =========
+        $tipo_venta     =   $documento->tipo_venta_id;
+        $parametro      =   null;
+        $message        =   "";
+
+        //===== 127:FACTURA | 128:BOLETA | 129:NOTA DE VENTA ======
+        if ($tipo_venta == 127) {
+            $parametro  =   "FF";   //====== NOTA CRÉDITO FACTURA =======
+            $message    =   "NOTAS DE CRÉDITO DE FACTURAS ELECTRÓNICAS";
+        }
+        if ($tipo_venta == 128) {
+            $parametro  =   "BB";   //======= NOTA CRÉDITO BOLETA =====
+            $message    =   "NOTAS DE CRÉDITO DE BOLETAS ELECTRÓNICAS";
+        }
+        if ($tipo_venta == 129) {
+            $parametro  =   "NN";   //===== NOTA DEVOLUCIÓN =======
+            $message    =   "NOTAS DE DEVOLUCIÓN DE NOTAS DE VENTA";
+        }
+
+        $existe =   DB::table('empresa_numeracion_facturaciones as enf')
+            ->select('enf.serie')
+            ->join('tabladetalles as td', 'td.id', '=', 'enf.tipo_comprobante')
+            ->where('td.parametro', $parametro)
+            ->where('td.tabla_id', 21)
+            ->where('enf.sede_id', $sede_id)
+            ->where('enf.estado', 'ACTIVO')
+            ->get();
+
+
+        return (object)["existe" => $existe, "message" => $message];
+    }
+
+    public function getDetalles($id)
+    {
+        $detalles = Detalle::where('estado', 'ACTIVO')->where('documento_id', $id)->get();
+        $coleccion_detalles = [];
+        foreach ($detalles as $detalle) {
+            if ($detalle->cantidad - $detalle->detalles->sum('cantidad') > 0) {
+                $item = [];
+                $item['codigo_producto']   =   $detalle->codigo_producto;
+                $item['producto_id']       =   $detalle->producto_id;
+                $item['color_id']          =   $detalle->color_id;
+                $item['talla_id']          =   $detalle->talla_id;
+                $item['producto_nombre']   =   $detalle->nombre_producto;
+                $item['color_nombre']      =   $detalle->nombre_color;
+                $item['talla_nombre']      =   $detalle->nombre_talla;
+                $item['modelo_nombre']     =   $detalle->nombre_modelo;
+                $item['cantidad']          =   $detalle->cantidad - $detalle->detalles->sum('cantidad');
+                $item['precio_unitario_nuevo']   =   $detalle->precio_unitario_nuevo;
+                $item['importe_nuevo']           =   $detalle->importe_nuevo;
+                $coleccion_detalles[]   =   $item;
+            }
+        }
+
+        return response()->json([
+            'success' => true,
+            'id_doc' => $id,
+            'detalles' => $coleccion_detalles
+        ]);
+    }
+
+    public function obtenerFecha($fecha)
+    {
+        $date = strtotime($fecha);
+        $fecha_emision = date('Y-m-d', $date);
+        $hora_emision = date('H:i:s', $date);
+        $fecha = $fecha_emision . 'T' . $hora_emision . '-05:00';
+
+        return $fecha;
+    }
+
+/*
+array:22 [
+  "_token" => "U8AMcFmutrQgNqyp8Q5PSRy7G2bKVKQNYXzgq4jY"
+  "documento_id" => "139"
+  "tipo_nota" => "0"
+  "productos_tabla" => "[{"codigo_producto":"1001","producto_id":"1","color_id":"4","talla_id":"1","producto_nombre":"BOTAS AMELIA AX1","color_nombre":"DORADO","talla_nombre":"34","modelo_nombre":"BOTAS A1","cantidad_devolver":"1","precio_unitario":"30.00","importe":30}]"
+  "nota_venta" => "1"
+  "cod_motivo" => "07"
+  "des_motivo" => "aaa"
+  "cliente" => "LUIS DANIEL ALVA LUJAN"
+  "documento_cliente" => "75608753"
+  "serie_nota" => null
+  "numero_nota" => null
+  "fecha_emision" => "2025-09-02"
+  "fecha_documento" => "2025-09-02"
+  "serie_doc" => "N001"
+  "numero_doc" => "23"
+  "tipo_pago" => "CONTADO"
+  "sub_total" => "37.29"
+  "total_igv" => "6.71"
+  "total" => "44.00"
+  "sub_total_nuevo" => "25.42"
+  "total_igv_nuevo" => "4.58"
+  "total_nuevo" => "30.00"
+]
+*/
+    public function store(NotaElectronicaStoreRequest $request)
+    {
+        try {
+            DB::beginTransaction();
+
+            $nota   =   $this->s_nota_credito->store($request->toArray());
+           
+            //==== REGISTRO DE ACTIVIDAD ====
+            $descripcion = "SE AGREGÓ UNA NOTA DE CREDITO CON LA FECHA: " . Carbon::parse($nota->fechaEmision)->format('d/m/y');
+            $gestion = "NOTA DE CREDITO";
+            crearRegistro($nota, $descripcion, $gestion);
+
+
+            DB::commit();
+
+            if (!isset($request->nota_venta)) {
+                // $envio_post = self::sunat_post($nota->id);
+            }
+
+            $text = 'Nota de crédito creada, se creo un egreso con el monto de la nota de credito.';
+
+            if (isset($request->nota_venta)) {
+                $text = 'Nota de devolución creada, se creo un egreso con el monto de la nota de devolución.';
+            }
+
+            Session::flash('success', $text);
+            return response()->json([
+                'success' => true,
+                'nota_id' => $nota->id
+            ]);
+        } catch (Throwable $e) {
+            DB::rollBack();
+
+            return response()->json([
+                'success' => false,
+                'mensaje' => $e->getMessage(),
+                'excepcion' => $e->getMessage()
+            ]);
+        }
+    }
+
+
+    /*public function store_old(Request $request)
+    {
+        try
+        {
+            DB::beginTransaction();
+            $data = $request->all();
+            $rules = [
+                'documento_id' => 'required',
+                'fecha_emision'=> 'required',
+                'tipo_nota'=> 'required',
+                'cliente'=> 'required',
+                'des_motivo' => 'required',
+                'cod_motivo' => 'required',
+
+            ];
+            $message = [
+                'fecha_emision.required' => 'El campo Fecha de Emisión es obligatorio.',
+                'tipo_nota.required' => 'El campo Tipo es obligatorio.',
+                'cod_motivo.required' => 'El campo Tipo Nota de Crédito es obligatorio.',
+                'cliente.required' => 'El campo Cliente es obligatorio.',
+                'des_motivo.required' => 'El campo Motivo es obligatorio.',
+            ];
+
+            $validator =  Validator::make($data, $rules, $message);
+
+            if ($validator->fails()) {
+                return response()->json([
+                    'errors' => true,
+                    'data' => array('mensajes' => $validator->getMessageBag()->toArray())
+                ]);
+
+            }
+
+
+
+            $documento = Documento::find($request->get('documento_id'));
+
+
+            $igv = $documento->igv ? $documento->igv : 18;
+
+            $nota = new Nota();
+            $nota->documento_id = $documento->id;
+            $nota->tipDocAfectado = $documento->tipoDocumento();
+            $nota->numDocfectado = $documento->serie.'-'.$documento->correlativo;
+            $nota->codMotivo = $request->get('cod_motivo');
+            $nota->desMotivo =  $request->get('des_motivo');
+
+            $nota->tipoDoc = $request->get('tipo_nota') === '0' ? '07' : '08';
+            $nota->fechaEmision = $request->get('fecha_emision');
+
+            //EMPRESA
+            $nota->ruc_empresa =  $documento->ruc_empresa;
+            $nota->empresa =  $documento->empresa;
+            $nota->direccion_fiscal_empresa =  $documento->direccion_fiscal_empresa;
+            $nota->empresa_id =  $documento->empresa_id; //OBTENER NUMERACION DE LA EMPRESA
+
+            //CLIENTE
+            $nota->cod_tipo_documento_cliente =  $documento->tipoDocumentoCliente();
+            $nota->tipo_documento_cliente =  $documento->tipo_documento_cliente;
+            $nota->documento_cliente =  $documento->documento_cliente;
+            $nota->direccion_cliente =  $documento->direccion_cliente;
+            $nota->cliente =  $documento->cliente;
+
+            $nota->sunat = '0';
+            $nota->tipo_nota = $request->get('tipo_nota'); //0 -> CREDITO
+
+            $nota->mtoOperGravadas = $request->get('sub_total_nuevo');
+            $nota->mtoIGV = $request->get('total_igv_nuevo');
+            $nota->totalImpuestos = $request->get('total_igv_nuevo');
+            $nota->mtoImpVenta =  $request->get('total_nuevo');
+
+            $nota->value = self::convertirTotal($request->get('total_nuevo'));
+            $nota->code = '1000';
+            $nota->user_id = auth()->user()->id;
+            $nota->save();
+
+
+            //Llenado de los articulos
+            $productosJSON = $request->get('productos_tabla');
+            $productotabla = json_decode($productosJSON);
+
+
+
+            foreach ($productotabla as $producto) {
+
+
+                    $detalle =  DB::select('select cdd.id
+                                from cotizacion_documento_detalles as cdd
+                                where cdd.documento_id=? and cdd.producto_id=?  and cdd.color_id=?
+                                and cdd.talla_id=?',[
+                                    $request->get('documento_id'),
+                                    $producto->producto_id,
+                                    $producto->color_id,
+                                    $producto->talla_id
+                                ]);
+
+                    NotaDetalle::create(
+                        [
+                            'nota_id' => $nota->id,
+                            'detalle_id' => $detalle[0]->id,
+                            'codProducto' => $producto->codigo_producto,
+                            'unidad' => 'NIU',
+                            'descripcion' => $producto->modelo_nombre.'-'.$producto->producto_nombre.'-'.$producto->color_nombre.'-'.$producto->talla_nombre,
+                            'cantidad' => $producto->cantidad_devolver,
+                            'mtoBaseIgv' => ($producto->precio_unitario / (1 + ($documento->igv/100))) * $producto->cantidad_devolver,
+                            'porcentajeIgv' => 18,
+                            'igv' => ($producto->precio_unitario - ($producto->precio_unitario / (1 + ($documento->igv/100)) )) * $producto->cantidad_devolver,
+                            'tipAfeIgv' => 10,
+                            'totalImpuestos' => ($producto->precio_unitario - ($producto->precio_unitario / (1 + ($documento->igv/100)) )) * $producto->cantidad_devolver,
+                            'mtoValorVenta' => ($producto->precio_unitario / (1 + ($documento->igv/100))) * $producto->cantidad_devolver,
+                            'mtoValorUnitario'=>  $producto->precio_unitario / (1 + ($documento->igv/100)),
+                            'mtoPrecioUnitario' => $producto->precio_unitario,
+                            'producto_id'   =>  $producto->producto_id,
+                            'color_id'      =>  $producto->color_id,
+                            'talla_id'      =>  $producto->talla_id
+                        ]);
+
+                    //===== AUMENTANDO EL STOCK LOGICO Y FISICO ====
+                    DB::table('producto_color_tallas')
+                    ->where('producto_id', $producto->producto_id)
+                    ->where('color_id', $producto->color_id)
+                    ->where('talla_id', $producto->talla_id)
+                    ->update([
+                        'stock_logico' => DB::raw('stock_logico + ' . $producto->cantidad_devolver),
+                        'stock' => DB::raw('stock + ' . $producto->cantidad_devolver)
+                    ]);
+
+                if($request->cod_motivo == '01'){   //==== EN CASO DEVOLUCIÓN TOTAL ====
+                    $documento->sunat = '2';
+                    $documento->update();
+                }
+            //     if($request->cod_motivo != '01')
+            //     {
+            //         if($producto->editable == 1)
+            //         {
+            //             $detalle = Detalle::find($producto->id);
+            //             $lote = LoteProducto::findOrFail($detalle->lote_id);
+            //             NotaDetalle::create([
+            //                 'nota_id' => $nota->id,
+            //                 'detalle_id' => $detalle->id,
+            //                 'codProducto' => $lote->producto->codigo,
+            //                 'unidad' => $lote->producto->getMedida(),
+            //                 'descripcion' => $lote->producto->nombre.' - '.$lote->codigo,
+            //                 'cantidad' => $producto->cantidad,
+
+            //                 'mtoBaseIgv' => ($producto->precio_unitario / (1 + ($documento->igv/100))) * $producto->cantidad,
+            //                 'porcentajeIgv' => 18,
+            //                 'igv' => ($producto->precio_unitario - ($producto->precio_unitario / (1 + ($documento->igv/100)) )) * $producto->cantidad,
+            //                 'tipAfeIgv' => 10,
+
+            //                 'totalImpuestos' => ($producto->precio_unitario - ($producto->precio_unitario / (1 + ($documento->igv/100)) )) * $producto->cantidad,
+            //                 'mtoValorVenta' => ($producto->precio_unitario / (1 + ($documento->igv/100))) * $producto->cantidad,
+            //                 'mtoValorUnitario'=>  $producto->precio_unitario / (1 + ($documento->igv/100)),
+            //                 'mtoPrecioUnitario' => $producto->precio_unitario,
+            //             ]);
+
+            //             $lote->cantidad = $lote->cantidad + $producto->cantidad;
+            //             $lote->cantidad_logica = $lote->cantidad_logica + $producto->cantidad;
+            //             if ($lote->cantidad > 0) {
+            //                 $lote->estado = '1';
+            //             }
+            //             $lote->update();
+            //         }
+            //     }
+            //     else
+            //     {
+            //         $detalle = Detalle::find($producto->id);
+            //         $lote = LoteProducto::findOrFail($detalle->lote_id);
+            //         NotaDetalle::create([
+            //             'nota_id' => $nota->id,
+            //             'detalle_id' => $detalle->id,
+            //             'codProducto' => $lote->producto->codigo,
+            //             'unidad' => $lote->producto->getMedida(),
+            //             'descripcion' => $lote->producto->nombre.' - '.$lote->codigo,
+            //             'cantidad' => $producto->cantidad,
+
+            //             'mtoBaseIgv' => ($producto->precio_unitario / (1 + ($documento->igv/100))) * $producto->cantidad,
+            //             'porcentajeIgv' => 18,
+            //             'igv' => ($producto->precio_unitario - ($producto->precio_unitario / (1 + ($documento->igv/100)) )) * $producto->cantidad,
+            //             'tipAfeIgv' => 10,
+
+            //             'totalImpuestos' => ($producto->precio_unitario - ($producto->precio_unitario / (1 + ($documento->igv/100)) )) * $producto->cantidad,
+            //             'mtoValorVenta' => ($producto->precio_unitario / (1 + ($documento->igv/100))) * $producto->cantidad,
+            //             'mtoValorUnitario'=>  $producto->precio_unitario / (1 + ($documento->igv/100)),
+            //             'mtoPrecioUnitario' => $producto->precio_unitario,
+            //         ]);
+
+            //         $lote->cantidad = $lote->cantidad + $producto->cantidad;
+            //         $lote->cantidad_logica = $lote->cantidad_logica + $producto->cantidad;
+            //         if ($lote->cantidad > 0) {
+            //             $lote->estado = '1';
+            //         }
+            //         $lote->update();
+
+            //         $documento->sunat = '2';
+            //         $documento->update();
+            //     }
+            }
+
+            //==== REGISTRO DE ACTIVIDAD ====
+            $descripcion = "SE AGREGÓ UNA NOTA DE DEBITO CON LA FECHA: ". Carbon::parse($nota->fechaEmision)->format('d/m/y');
+            $gestion = "NOTA DE DEBITO";
+            crearRegistro($nota , $descripcion , $gestion);
+
+
+            //======== OBTENER CORRELATIVO ======
+            $envio_prev = self::sunat_prev($nota->id,$documento->tipo_venta);
+
+
+            if(!$envio_prev['success']){
+                DB::rollBack();
+                return response()->json([
+                    'success' => false,
+                    'mensaje'=> $envio_prev['mensaje']
+                ]);
+            }else{
+                $nota->serie        =   $envio_prev['serie'];
+                $nota->correlativo  =   $envio_prev['correlativo'];
+                $nota->update();
+
+                //======= SI LA EMISIÓN NO HA INICIADO, ACTUALIZAR =======
+                if($envio_prev['model_numeracion']->emision_iniciada == 0){
+                    DB::table('empresa_numeracion_facturaciones')
+                    ->where('id', $envio_prev['model_numeracion']->id)
+                    ->update(['emision_iniciada' => '1']);
+                }
+            }
+
+            DB::commit();
+            if(!isset($request->nota_venta))
+            {
+                // $envio_post = self::sunat_post($nota->id);
+            }
+
+            $text = 'Nota de crédito creada, se creo un egreso con el monto de la nota de credito.';
+
+            if(isset($request->nota_venta))
+            {
+                 $text = 'Nota de devolución creada, se creo un egreso con el monto de la nota de devolución.';
+            }
+
+            Session::flash('success', $text);
+            return response()->json([
+                'success' => true,
+                'nota_id'=> $nota->id
+            ]);
+
+        }
+        catch(\Throwable $e)
+        {
+            DB::rollBack();
+
+            return response()->json([
+                'success' => false,
+                'mensaje'=> $e->getMessage(),
+                'excepcion' => $e->getMessage()
+            ]);
+        }
+
+
+        // //======= ENVÍO A SUNAT =======
+        // //======= ENVIAR A SUNAT CUANDO NO SEA NOTA DE VENTA ========
+        // if(!$request->has('nota_venta')){
+        //     $res_send_sunat   = $this->sunat($nota->id,'fetch');
+        //     //dd($res_send_sunat);
+        // }
+
+    }*/
+
+
+    public function obtenerLeyenda($nota)
+    {
+        //CREAR LEYENDA DEL COMPROBANTE
+        $arrayLeyenda = array();
+        $arrayLeyenda[] = array(
+            "code" => $nota->code,
+            "value" => $nota->value
+        );
+        return $arrayLeyenda;
+    }
+
+    public function obtenerProductos($detalles)
+    {
+
+        $arrayProductos = array();
+        for ($i = 0; $i < count($detalles); $i++) {
+
+            $arrayProductos[] = array(
+                "codProducto" => $detalles[$i]->codProducto,
+                "unidad" => $detalles[$i]->unidad,
+                "descripcion" => $detalles[$i]->descripcion,
+                "cantidad" => $detalles[$i]->cantidad,
+
+                'mtoBaseIgv' => floatval($detalles[$i]->mtoBaseIgv),
+                'porcentajeIgv' => floatval($detalles[$i]->porcentajeIgv),
+                'igv' => floatval($detalles[$i]->igv),
+                'tipAfeIgv' => floatval($detalles[$i]->tipAfeIgv),
+
+                'totalImpuestos' => floatval($detalles[$i]->totalImpuestos),
+                'mtoValorVenta' => floatval($detalles[$i]->mtoValorVenta),
+                'mtoValorUnitario' => floatval($detalles[$i]->mtoValorUnitario),
+                'mtoPrecioUnitario' => floatval($detalles[$i]->mtoPrecioUnitario),
+
+            );
+        }
+
+        return $arrayProductos;
+    }
+
+    public function show($id)
+    {
+        $nota       = Nota::with(['documento'])->findOrFail($id);
+        $empresa    = Empresa::first();
+        $detalles   = NotaDetalle::where('nota_id', $id)->get();
+
+
+
+
+        $legends = self::obtenerLeyenda($nota);
+        $legends = json_encode($legends, true);
+        $legends = json_decode($legends, true);
+
+        $pdf = PDF::loadview('ventas.notas.impresion.comprobante_normal_nuevo', [
+            'nota'      =>  $nota,
+            'detalles'  =>  $detalles,
+            'moneda'    =>  $nota->tipoMoneda,
+            'empresa'   =>  $empresa,
+            "legends"   =>  $legends,
+        ])->setPaper('a4')->setWarnings(false);
+
+        //$pdf->save(storage_path().'/app/public/comprobantessiscom/notas/'.$name);
+        return $pdf->stream($nota->serie . '-' . $nota->correlativo);
+    }
+
+    public function show_dev($id)
+    {
+        $nota       = Nota::with(['documento'])->findOrFail($id);
+        $empresa    = Empresa::first();
+        $detalles   = NotaDetalle::where('nota_id', $id)->get();
+
+        $legends = self::obtenerLeyenda($nota);
+        $legends = json_encode($legends, true);
+        $legends = json_decode($legends, true);
+
+        $name = 'NOTA-' . $nota->id;
+
+        if (!file_exists(storage_path('app' . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'comprobantessiscom'))) {
+            mkdir(storage_path('app' . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'comprobantessiscom'));
+        }
+
+        if (!file_exists(storage_path('app' . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'comprobantessiscom' . DIRECTORY_SEPARATOR . 'notas'))) {
+            mkdir(storage_path('app' . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'comprobantessiscom' . DIRECTORY_SEPARATOR . 'notas'));
+        }
+
+        $pdf = PDF::loadview('ventas.notas.impresion.comprobante_normal_nuevo', [
+            'nota' => $nota,
+            'detalles' => $detalles,
+            'moneda' => $nota->tipoMoneda,
+            'empresa' => $empresa,
+            "legends" =>  $legends,
+            "nota_venta" => 1,
+        ])->setPaper('a4')->setWarnings(false);
+
+        $pdf->save(storage_path() . '/app/public/comprobantessiscom/notas/' . $name);
+        //$pdf->save(public_path().'/storage/comprobantessiscom/notas/'.$name);
+        return $pdf->stream($name);
+    }
+
+    public function obtenerCorrelativo($nota, $numeracion)
+    {
+        //dd($numeracion->serie);
+        //========= OJO : NUMERACIÓN CONTIENE  SERIE , EMISIÓN INICIADA 1:0 , NUMERO INICIAR ===========
+
+        //======== SI LA NOTA AÚN NO TIENE CORRELATIVO =======
+        if (!$nota->correlativo) {
+            //====== PARA NOTAS DE CRÉDITO ======
+            if ($nota->tipo_nota == '0') {
+
+                //===== EMISIÓN NO INICIADA =====
+                if ($numeracion->emision_iniciada == "0") {
+                    //====== CORRELATIVO IGUAL AL NRO INICIAR =======
+                    return $numeracion->numero_iniciar;
+                }
+
+                //======== EMISIÓN YA INICIADA ======
+                if ($numeracion->emision_iniciada == "1") {
+                    //====== CORRELATIVO SERÁ EL SIGUIENTE A LA ULTIMA NOTA ELECTRONICA ==========//
+                    //====== DEL MISMO TIPO BB01,FF01,NN01 ======= //
+                    $ultima_nota =   DB::select('select ne.correlativo
+                                            from nota_electronica as ne
+                                            where ne.serie=?
+                                            order by ne.id desc', [$numeracion->serie]);
+
+                    return $ultima_nota[0]->correlativo + 1;
+                }
+            }
+        }
+        // if(empty($nota->correlativo))
+        // {
+        //     $serie_comprobantes = DB::table('empresa_numeracion_facturaciones')
+        //     ->join('empresas','empresas.id','=','empresa_numeracion_facturaciones.empresa_id')
+        //     ->join('cotizacion_documento','cotizacion_documento.empresa_id','=','empresas.id')
+        //     ->join('nota_electronica','nota_electronica.documento_id','=','cotizacion_documento.id')
+        //     ->when($nota->tipo_nota, function ($query, $request) {
+        //         //======= TIPO NOTA :0 CRÉDITO - 1:DÉBITO =======
+        //         if ($request == '1') {
+        //             //======= 131 NOTA DÉBITO ========
+        //             return $query->where('empresa_numeracion_facturaciones.tipo_comprobante',131);
+        //         }else{
+        //             //====== 130 NOTA CRÉDITO =========
+        //             return $query->where('empresa_numeracion_facturaciones.tipo_comprobante',130);
+        //         }
+        //     })
+        //     ->where('empresa_numeracion_facturaciones.empresa_id',$nota->empresa_id)
+        //     ->whereIn('nota_electronica.tipDocAfectado', ['01', '03'])
+        //     ->select('nota_electronica.*','empresa_numeracion_facturaciones.*')
+        //     ->orderBy('nota_electronica.correlativo','DESC')
+        //     ->get();
+
+        //     if ($nota->tipDocAfectado == '04') {
+        //         $serie_comprobantes = DB::table('empresa_numeracion_facturaciones')
+        //         ->join('empresas', 'empresas.id', '=', 'empresa_numeracion_facturaciones.empresa_id')
+        //         ->join('cotizacion_documento', 'cotizacion_documento.empresa_id', '=', 'empresas.id')
+        //         ->join('nota_electronica', 'nota_electronica.documento_id', '=', 'cotizacion_documento.id')
+        //         ->when($nota->tipo_nota, function ($query, $request) {
+        //             if ($request == '1') {
+        //                 return $query->where('empresa_numeracion_facturaciones.tipo_comprobante', 131);
+        //             } else {
+        //                 return $query->where('empresa_numeracion_facturaciones.tipo_comprobante', 130);
+        //             }
+        //         })
+        //             ->where('empresa_numeracion_facturaciones.empresa_id', $nota->empresa_id)
+        //             ->where('nota_electronica.tipDocAfectado', '04')
+        //             ->select('nota_electronica.*', 'empresa_numeracion_facturaciones.*')
+        //             ->orderBy('nota_electronica.correlativo', 'DESC')
+        //             ->get();
+        //     }
+
+
+        //     if (count($serie_comprobantes) === 1) {
+        //         //OBTENER EL DOCUMENTO INICIADO
+        //         $nota->correlativo  = $numeracion->numero_iniciar;
+        //         $nota->serie        = $numeracion->serie;//$numeracion->serie;
+        //         $nota->update();
+
+        //         //ACTUALIZAR LA NUMERACION (SE REALIZO EL INICIO)
+        //         self::actualizarNumeracion($numeracion);
+        //         return $nota->correlativo;
+
+        //     }else{
+        //         //NOTA ES NUEVO EN SUNAT
+        //         if($nota->sunat != '1' ){
+        //             $ultimo_comprobante = $serie_comprobantes->first();
+        //             $nota->correlativo = $ultimo_comprobante->correlativo+1;
+        //             $nota->serie = $numeracion->serie;//$numeracion->serie;
+        //             $nota->update();
+
+        //             //ACTUALIZAR LA NUMERACION (SE REALIZO EL INICIO)
+        //             self::actualizarNumeracion($numeracion);
+        //             return $nota->correlativo;
+        //         }
+        //     }
+        // }
+        // else
+        // {
+        //     return $nota->correlativo;
+        // }
+    }
+
+    public function actualizarNumeracion($numeracion)
+    {
+        $numeracion->emision_iniciada = '1';
+        $numeracion->update();
+    }
+
+    public function numeracion($nota, $tipo_venta)
+    {
+        // $nota = Nota::findOrFail($id);
+
+        //======== BUSCAR SI ESTÁ ACTIVADA LA EMISIÓN DE NOTAS DE CREDITO O DÉBITO EN LA EMPRESA ======
+        $numeracion         =   null;
+        $tipo_comprobante   =   null;
+
+        //======= 1=NOTA DÉBITO ======
+        if ($nota->tipo_nota == '1') {
+            $numeracion = Numeracion::where('empresa_id', $nota->empresa_id)->where('estado', 'ACTIVO')->where('tipo_comprobante', 131)->first();
+        } else {
+            //===== NOTA CRÉDITO = 0 ======
+
+            //======== FACTURAS ======
+            if ($tipo_venta == 127) {
+                //====== NOTA CRÉDITO FACTURA FF01 =====
+                //====== BUSCANDO CODIGO DE NOTA CREDITO FACTURA =====
+                $tipo_comprobante =   DB::select('select td.id from tabladetalles as td
+                                        where td.descripcion="NOTA DE CRÉDITO FACTURA"');
+            }
+
+            //======== BOLETAS ======
+            if ($tipo_venta == 128) {
+                $tipo_comprobante =   DB::select('select td.id from tabladetalles as td
+                                        where td.descripcion="NOTA DE CRÉDITO BOLETA"');
+                //====== NOTA CRÉDITO BOLETA BB01 =====
+            }
+
+            //======== NOTAS DE VENTA ======
+            if ($tipo_venta == 129) {
+                //====== NOTA DE DEVOLUCIÓN NN01 =====
+                $tipo_comprobante =   DB::select('select td.id from tabladetalles as td
+                                        where td.descripcion="NOTA DE DEVOLUCIÓN"');
+            }
+
+            if (count($tipo_comprobante) > 0) {
+                $numeracion = Numeracion::where('empresa_id', $nota->empresa_id)->where('estado', 'ACTIVO')
+                    ->where('tipo_comprobante', $tipo_comprobante[0]->id)->first();
+            }
+        }
+
+        if ($numeracion) {
+            $resultado = ($numeracion)->exists();
+            if ($resultado) {
+                $enviar = [
+                    'existe'        => true,
+                    'numeracion'    => $numeracion,
+                    'correlativo'   => self::obtenerCorrelativo($nota, $numeracion),
+                    'serie'         => $numeracion->serie
+                ];
+            } else {
+                $enviar = [
+                    'existe'        => false
+                ];
+            }
+
+            $collection = collect($enviar);
+            return  $collection;
+        }
+    }
+
+    public function sunat($id)
+    {
+
+        try {
+            $util       = Util::getInstance();
+            $nota       = Nota::find($id);
+            $documento  = Documento::find($nota->documento_id);
+            $detalles   = NotaDetalle::where('nota_id', $id)->get();
+
+
+            if (!$nota) {
+                Session::flash('nota_credito_error', 'NO SE ENCONTRÓ LA NOTA DE CRÉDITO EN LA BASE DE DATOS');
+                return back();
+            }
+            if (!$documento) {
+                Session::flash('nota_credito_error', 'NO SE ENCONTRÓ EL DOC AFECTADO EN LA BASE DE DATOS');
+                return back();
+            }
+            if (count($detalles) === 0) {
+                Session::flash('nota_credito_error', 'LA NOTA DE CRÉDITO NO TIENE DETALLES');
+                return back();
+            }
+
+            $des_motivo =   '-';
+            if ($nota->codMotivo == '01') {
+                $des_motivo =   "ANULACION DE LA OPERACION";
+            }
+            if ($nota->codMotivo == '07') {
+                $des_motivo =   "DEVOLUCION POR ITEM";
+            }
+
+            //====== CONSTRUIR CLIENTE ======
+            $client = (new Client())
+                ->setTipoDoc($nota->cod_tipo_documento_cliente)
+                ->setNumDoc($nota->documento_cliente)
+                ->setRznSocial($nota->cliente)
+                ->setAddress((new Address())
+                    ->setDireccion($nota->direccion_cliente));
+
+            //======== CONSTRUYENDO CABEZERA =====
+            $note = new Note();
+            $note
+                ->setUblVersion('2.1')
+                ->setTipoDoc('07') // Tipo Doc: Nota de Credito
+                ->setSerie($nota->serie) // Serie NCR
+                ->setCorrelativo($nota->correlativo) // Correlativo NCR
+                ->setFechaEmision(new DateTime($nota->created_at))
+                ->setTipDocAfectado($nota->tipDocAfectado) // Tipo Doc: 03-BOLETA 01-FACTURA
+                ->setNumDocfectado($nota->numDocfectado) // Boleta: Serie-Correlativo
+                ->setCodMotivo($nota->codMotivo) // Catalogo. 09    01:ANULACION DE LA OPERACION    07:DEVOLUCION POR ITEM
+                ->setDesMotivo($des_motivo)
+                ->setTipoMoneda('PEN')
+                ->setCompany($util->shared->getCompany($nota->sede_id))
+                ->setClient($client)
+                ->setMtoOperGravadas($nota->mtoOperGravadas)
+                ->setMtoIGV($nota->mtoIGV)
+                ->setTotalImpuestos($nota->totalImpuestos)
+                ->setMtoImpVenta($nota->mtoImpVenta);
+
+
+            //====== CONSTRUYENDO DETALLE =====
+            $items  =   [];
+            foreach ($detalles as $detalle) {
+                $item1 = new SaleDetail();
+                $item1->setCodProducto($detalle->codProducto)
+                    ->setUnidad($detalle->unidad)
+                    ->setCantidad($detalle->cantidad)
+                    ->setDescripcion($detalle->descripcion)
+                    ->setMtoBaseIgv($detalle->mtoBaseIgv)
+                    ->setPorcentajeIgv($detalle->porcentajeIgv)
+                    ->setIgv($detalle->igv)
+                    ->setTipAfeIgv((int)$detalle->tipAfeIgv)
+                    ->setTotalImpuestos($detalle->totalImpuestos)
+                    ->setMtoValorVenta($detalle->mtoValorVenta)
+                    ->setMtoValorUnitario($detalle->mtoValorUnitario)
+                    ->setMtoPrecioUnitario($detalle->mtoPrecioUnitario);
+
+                $items[]    =   $item1;
+            }
+
+            //======= CONSTRUYENDO LEGENDA ======
+            $legenda_nota    = 'SON' . ' ' . $nota->value;
+
+            $legend = new Legend();
+            $legend->setCode('1000')
+                ->setValue($legenda_nota);
+
+            $note->setDetails($items)
+                ->setLegends([$legend]);
+
+            $see =   $this->controlConfiguracionGreenter($util);
+            $res =   $see->send($note);
+
+
+            $util->writeXml($note, $see->getFactory()->getLastXml(), $nota->tipoDoc . '-' . $nota->tipDocAfectado, null);
+            if ($nota->tipDocAfectado == '03') {
+                $nota->ruta_xml      =   'storage/greenter/notas_credito_boletas/xml/' . $note->getName() . '.xml';
+            }
+            if ($nota->tipDocAfectado == '01') {
+                $nota->ruta_xml      =   'storage/greenter/notas_credito_facturas/xml/' . $note->getName() . '.xml';
+            }
+            $nota->nota_name        =   $note->getName();
+
+            //======== ENVÍO CORRECTO Y ACEPTADO ==========
+            if ($res->isSuccess()) {
+
+                //====== GUARDANDO RESPONSE ======
+                $cdr                                    =   $res->getCdrResponse();
+                $nota->cdr_response_id                  =   $cdr->getId();
+                $nota->cdr_response_code                =   $cdr->getCode();
+                $nota->cdr_response_description         =   $cdr->getDescription();
+                $nota->cdr_response_notes               =   implode(" | ", $cdr->getNotes());
+                $nota->cdr_response_reference           =   $cdr->getReference();
+
+                $util->writeCdr($note, $res->getCdrZip(), $nota->tipoDoc . '-' . $nota->tipDocAfectado, null);
+
+                if ($nota->tipDocAfectado == '03') {
+                    $nota->ruta_cdr      =   'storage/greenter/notas_credito_boletas/cdr/' . $note->getName() . '.zip';
+                }
+                if ($nota->tipDocAfectado == '01') {
+                    $nota->ruta_cdr      =   'storage/greenter/notas_credito_facturas/cdr/' . $note->getName() . '.zip';
+                }
+
+                $nota->sunat                        =   "1";
+                $nota->update();
+
+                Session::flash('nota_credito_sunat_success', $cdr->getDescription());
+                return back();
+                //return response()->json(["success"   =>  true,"message"=>$cdr->getDescription()]);
+            } else {
+                $nota->response_error_message  =   $res->getError()->getMessage();
+                $nota->response_error_code     =   $res->getError()->getCode();
+                $nota->regularize              =   '1';
+                $nota->update();
+
+                //if($res->getError()->getCode() == 2223){
+                //  dd($res);
+                //  return response()->json(["success"   =>  true,"message"=>$cdr->getDescription()]);
+                //}
+
+                throw new Exception("ERROR AL ENVIAR FACTURA A SUNAT. " . "CÓDIGO: " . $res->getError()->getCode()
+                    . ",DESCRIPCIÓN: " . $res->getError()->getMessage());
+            }
+        } catch (Throwable $th) {
+            Session::flash('nota_credito_sunat_error', $th->getMessage());
+            return back();
+        }
+    }
+
+    public function controlConfiguracionGreenter($util)
+    {
+        //==== OBTENIENDO CONFIGURACIÓN DE GREENTER ======
+        $greenter_config    =   DB::select('select
+                                gc.ruta_certificado,
+                                gc.id_api_guia_remision,
+                                gc.modo,
+                                gc.clave_api_guia_remision,
+                                e.ruc,e.razon_social,
+                                e.direccion_fiscal,
+                                e.ubigeo,
+                                e.direccion_llegada,
+                                gc.sol_user,gc.sol_pass
+                                from greenter_config as gc
+                                inner join empresas as e on e.id=gc.empresa_id
+                                inner join configuracion as c on c.propiedad = gc.modo
+                                where gc.empresa_id=1 and c.slug="AG"');
+
+
+        if (count($greenter_config) === 0) {
+            throw new Exception('NO SE ENCONTRÓ NINGUNA CONFIGURACIÓN PARA GREENTER');
+        }
+
+        if (!$greenter_config[0]->sol_user) {
+            throw new Exception('DEBE ESTABLECER LA CREDENCIAL SOL_USER');
+        }
+        if (!$greenter_config[0]->sol_pass) {
+            throw new Exception('DEBE ESTABLECER LA CREDENCIAL SOL_PASS');
+        }
+        if ($greenter_config[0]->modo !== "BETA" && $greenter_config[0]->modo !== "PRODUCCION") {
+            throw new Exception('NO SE HA CONFIGURADO EL AMBIENTE BETA O PRODUCCIÓN PARA GREENTER');
+        }
+
+        $see    =   null;
+        if ($greenter_config[0]->modo === "BETA") {
+            //===== MODO BETA ======
+            $see = $util->getSee(SunatEndpoints::FE_BETA, $greenter_config[0]);
+        }
+
+        if ($greenter_config[0]->modo === "PRODUCCION") {
+            //===== MODO PRODUCCION ======
+            $see = $util->getSee(SunatEndpoints::FE_PRODUCCION, $greenter_config[0]);
+        }
+
+        if (!$see) {
+            throw new Exception('ERROR EN LA CONFIGURACIÓN DE GREENTER, SEE ES NULO');
+        }
+
+        return $see;
+    }
+
+
+    public function sunat_prev($nota_id, $tipo_venta)
+    {
+        try {
+            $nota = Nota::findOrFail($nota_id);
+            //OBTENER CORRELATIVO DE LA NOTA CREDITO / DEBITO
+            $res_numeracion = self::numeracion($nota, $tipo_venta);
+            if ($res_numeracion) {
+                if ($res_numeracion->get('existe') == true) {
+                    return array(
+                        'success' => true,
+                        'mensaje' => 'Nota validada.',
+                        'correlativo' => $res_numeracion->get('correlativo'),
+                        'serie' => $res_numeracion->get('serie'),
+                        'model_numeracion' => $res_numeracion->get('numeracion')
+                    );
+                } else {
+                    return array('success' => false, 'mensaje' => 'Nota de crédito no se encuentra registrado en la empresa.');
+                }
+            } else {
+                return array('success' => false, 'mensaje' => 'Empresa sin parametros para emitir Nota de crédito electrónica.');
+            }
+        } catch (Exception $e) {
+            return array('success' => false, 'mensaje' => $e->getMessage());
+        }
+    }
+
+    public function sunat_post($id)
+    {
+        try {
+            $nota = Nota::findOrFail($id);
+            $detalles = NotaDetalle::where('nota_id', $id)->get();
+            if ($nota->sunat != '1') {
+                //ARREGLO COMPROBANTE
+                $arreglo_nota = array(
+                    "tipDocAfectado" => $nota->tipDocAfectado,
+                    "numDocfectado" => $nota->numDocfectado,
+                    "codMotivo" => $nota->codMotivo,
+                    "desMotivo" => $nota->desMotivo,
+                    "tipoDoc" => $nota->tipoDoc,
+                    "fechaEmision" => self::obtenerFecha($nota->fechaEmision),
+                    "tipoMoneda" => $nota->tipoMoneda,
+                    "serie" => $nota->serie,
+                    "correlativo" => $nota->correlativo,
+                    "company" => array(
+                        "ruc" => $nota->ruc_empresa,
+                        "razonSocial" => $nota->empresa,
+                        "address" => array(
+                            "direccion" => $nota->direccion_fiscal_empresa,
+                        )
+                    ),
+
+
+                    "client" => array(
+                        "tipoDoc" =>  $nota->cod_tipo_documento_cliente,
+                        "numDoc" => $nota->documento_cliente,
+                        "rznSocial" => $nota->cliente,
+                        "address" => array(
+                            "direccion" => $nota->direccion_cliente,
+                        )
+                    ),
+
+                    "mtoOperGravadas" =>  floatval($nota->mtoOperGravadas),
+                    "mtoIGV" => floatval($nota->mtoIGV),
+                    "totalImpuestos" => floatval($nota->totalImpuestos),
+                    "mtoImpVenta" => floatval($nota->mtoImpVenta),
+                    "ublVersion" =>  $nota->ublVersion,
+                    "details" => self::obtenerProductos($detalles),
+                    "legends" =>  self::obtenerLeyenda($nota),
+                );
+                //OBTENER JSON DEL COMPROBANTE EL CUAL SE ENVIARA A SUNAT
+                $data = enviarNotaapi(json_encode($arreglo_nota));
+
+                //RESPUESTA DE LA SUNAT EN JSON
+                $json_sunat = json_decode($data);
+                if ($json_sunat->sunatResponse->success == true) {
+                    if ($json_sunat->sunatResponse->cdrResponse->code == "0") {
+                        $nota->sunat = '1';
+                        $respuesta_cdr = json_encode($json_sunat->sunatResponse->cdrResponse, true);
+                        $respuesta_cdr = json_decode($respuesta_cdr, true);
+                        $nota->getCdrResponse = $respuesta_cdr;
+
+                        $data_comprobante = pdfNotaapi(json_encode($arreglo_nota));
+                        $name = $nota->serie . "-" . $nota->correlativo . '.pdf';
+
+                        if (!file_exists(storage_path('app' . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'sunat'))) {
+                            mkdir(storage_path('app' . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'sunat'));
+                        }
+
+                        if (!file_exists(storage_path('app' . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'sunat' . DIRECTORY_SEPARATOR . 'nota'))) {
+                            mkdir(storage_path('app' . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'sunat' . DIRECTORY_SEPARATOR . 'nota'));
+                        }
+
+                        $pathToFile = storage_path('app' . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'sunat' . DIRECTORY_SEPARATOR . 'nota' . DIRECTORY_SEPARATOR . $name);
+
+                        /*************************************** */
+                        $arreglo_qr = array(
+                            "ruc" => $nota->ruc_empresa,
+                            "tipo" => $nota->tipoDoc,
+                            "serie" => $nota->serie,
+                            "numero" => $nota->correlativo,
+                            "emision" => self::obtenerFecha($nota->fechaEmision),
+                            "igv" => 18,
+                            "total" => floatval($nota->mtoImpVenta),
+                            "clienteTipo" => $nota->cod_tipo_documento_cliente,
+                            "clienteNumero" => $nota->documento_cliente
+                        );
+
+                        $data_qr = generarQrApi(json_encode($arreglo_qr), $nota->empresa_id);
+
+                        $name_qr = $nota->serie . "-" . $nota->correlativo . '.svg';
+
+                        if (!file_exists(storage_path('app' . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'sunat'))) {
+                            mkdir(storage_path('app' . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'sunat'));
+                        }
+
+                        if (!file_exists(storage_path('app' . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'qrs_nota'))) {
+                            mkdir(storage_path('app' . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'qrs_nota'));
+                        }
+
+                        $pathToFile_qr = storage_path('app' . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'qrs_nota' . DIRECTORY_SEPARATOR . $name_qr);
+
+                        file_put_contents($pathToFile_qr, $data_qr);
+                        /*************************************** */
+
+                        file_put_contents($pathToFile, $data_comprobante);
+                        $nota->hash = $json_sunat->hash;
+                        $nota->ruta_qr = 'public/qrs_nota/' . $name_qr;
+                        $nota->nombre_comprobante_archivo = $name;
+                        $nota->ruta_comprobante_archivo = 'public/sunat/nota/' . $name;
+                        $nota->update();
+
+
+                        //Registro de actividad
+                        $descripcion = "SE AGREGÓ LA NOTA ELECTRONICA: " . $nota->serie . "-" . $nota->correlativo;
+                        $gestion = "NOTAS ELECTRONICAS";
+                        crearRegistro($nota, $descripcion, $gestion);
+
+                        return array('success' => true, 'mensaje' => 'Nota de crédito enviada a Sunat con exito.');
+                    } else {
+                        $nota->sunat = '0';
+                        $id_sunat = $json_sunat->sunatResponse->cdrResponse->code;
+                        $descripcion_sunat = $json_sunat->sunatResponse->cdrResponse->description;
+
+                        $respuesta_error = json_encode($json_sunat->sunatResponse->cdrResponse, true);
+                        $respuesta_error = json_decode($respuesta_error, true);
+                        $nota->getCdrResponse = $respuesta_error;
+
+                        $nota->update();
+
+                        return array('success' => false, 'mensaje' => $descripcion_sunat);
+                    }
+                } else {
+
+                    //COMO SUNAT NO LO ADMITE VUELVE A SER 0
+                    // $nota->correlativo = null;
+                    // $nota->serie = null;
+                    $nota->sunat = '0';
+                    $nota->regularize = '1';
+
+                    if ($json_sunat->sunatResponse->error) {
+                        $id_sunat = $json_sunat->sunatResponse->error->code;
+                        $descripcion_sunat = $json_sunat->sunatResponse->error->message;
+                        $obj_erro = new stdClass;
+                        $obj_erro->code = $json_sunat->sunatResponse->error->code;
+                        $obj_erro->description = $json_sunat->sunatResponse->error->message;
+                        $respuesta_error = json_encode($obj_erro, true);
+                        $respuesta_error = json_decode($respuesta_error, true);
+                        $nota->getRegularizeResponse = $respuesta_error;
+                    } else {
+                        $id_sunat = $json_sunat->sunatResponse->cdrResponse->id;
+                        $descripcion_sunat = $json_sunat->sunatResponse->cdrResponse->description;
+                        $respuesta_error = json_encode($json_sunat->sunatResponse->cdrResponse, true);
+                        $respuesta_error = json_decode($respuesta_error, true);
+                        $nota->getCdrResponse = $respuesta_error;
+                    };
+
+
+                    $errorNota = new ErrorNota();
+                    $errorNota->nota_id = $nota->id;
+                    $errorNota->tipo = 'sunat-envio';
+                    $errorNota->descripcion = 'Error al enviar a sunat';
+                    $errorNota->ecxepcion = $descripcion_sunat;
+                    $errorNota->save();
+
+
+                    $nota->update();
+
+                    return array('success' => false, 'mensaje' => $descripcion_sunat);
+                }
+            } else {
+                $nota->sunat = '1';
+                $nota->update();
+                return array('success' => false, 'mensaje' => 'Nota de crédito ya fue enviado a Sunat.');
+            }
+        } catch (Exception $e) {
+            $nota = Nota::find($id);
+
+            $errorNota = new ErrorNota();
+            $errorNota->nota_id = $nota->id;
+            $errorNota->tipo = 'sunat-envio';
+            $errorNota->descripcion = 'Error al enviar a sunat';
+            $errorNota->ecxepcion = $e->getMessage();
+            $errorNota->save();
+            return array('success' => false, 'mensaje' => $e->getMessage());
+        }
+    }
+
+}

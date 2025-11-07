@@ -1,0 +1,17 @@
+/node_modules
+/public/hot
+/public/storage
+/storage/*.key
+/vendor
+.env
+.env.backup
+.phpunit.result.cache
+Homestead.json
+Homestead.yaml
+npm-debug.log
+yarn-error.log
+/.wwebjs_auth
+/.wwebjs_cache
+/resources/js/servers/wsp_server/node_modules
+/resources/js/servers/wsp_server/.wwebjs_auth
+/resources/js/servers/wsp_server/.wwebjs_cache

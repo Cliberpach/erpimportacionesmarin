@@ -1,0 +1,62 @@
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+class CreateNotaElectronicaDetalleTable extends Migration
+{
+    /**
+     * Run the migrations.
+     *
+     * @return void
+     */
+    public function up()
+    {
+        Schema::create('nota_electronica_detalle', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedInteger('nota_id');
+            $table->foreign('nota_id')->references('id')->on('nota_electronica')->onDelete('cascade');
+
+            $table->string('codProducto');
+            $table->string('unidad');
+            $table->longText('descripcion');
+            $table->unsignedDecimal('cantidad', 15, 2);
+            $table->unsignedInteger('detalle_id')->nullable();
+
+            $table->unsignedDecimal('mtoBaseIgv', 15, 2);
+            $table->unsignedDecimal('porcentajeIgv', 15, 2);
+            $table->unsignedDecimal('igv', 15, 2);
+            $table->unsignedDecimal('tipAfeIgv', 15, 2);
+
+            $table->unsignedDecimal('totalImpuestos', 15, 2);
+            $table->unsignedDecimal('mtoValorVenta', 15, 2);
+            $table->unsignedDecimal('mtoValorUnitario', 15, 2);
+            $table->unsignedDecimal('mtoPrecioUnitario', 15, 2);
+
+            $table->unsignedInteger('producto_id');
+            $table->foreign('producto_id')->references('id')->on('productos');
+            $table->unsignedInteger('color_id');
+            $table->foreign('color_id')->references('id')->on('colores');
+            $table->unsignedInteger('talla_id');
+            $table->foreign('talla_id')->references('id')->on('tallas');
+
+            $table->unsignedInteger('almacen_id');
+            $table->foreign('almacen_id')->references('id')->on('almacenes');
+
+
+            $table->string('almacen_nombre', 160);
+            $table->timestamps();
+        });
+    }
+
+    /**
+     * Reverse the migrations.
+     *
+     * @return void
+     */
+    public function down()
+    {
+        Schema::dropIfExists('nota_electronica_detalle');
+    }
+}

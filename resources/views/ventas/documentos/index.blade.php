@@ -1,0 +1,33 @@
+@extends('layout')
+@section('content')
+
+@section('ventas-active', 'active')
+@section('documento-active', 'active')
+
+@csrf
+
+<ventas-app
+:lst_modos_pago="{{ json_encode($modos_pago) }}"
+:v_sede = "{{json_encode($sede)}}"
+:registrador = "{{json_encode($registrador)}}"
+:lst_almacenes="{{ json_encode($almacenes) }}"
+:lst_departamentos_base="{{ json_encode($departamentos) }}"
+:lst_provincias_base="{{ json_encode($provincias) }}"
+:lst_distritos_base="{{ json_encode($distritos) }}"
+:lst_origenes_ventas="{{ json_encode($origenes_ventas) }}"
+:imginicial="'{{ asset('img/default.png') }}'">
+</ventas-app>
+
+@stop
+@push('styles')
+<style>
+    .letrapequeña {
+        font-size: 11px;
+    }
+</style>
+<link rel="stylesheet" href="/css/appPages.css">
+@endpush
+
+@push('scripts-vue-js')
+<script src="{{'/js/appPages.js?v='.rand() }}"></script>
+@endpush
